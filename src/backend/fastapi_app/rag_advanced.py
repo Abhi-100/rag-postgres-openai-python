@@ -1,27 +1,25 @@
 import json
 from collections.abc import AsyncGenerator
-from typing import Optional, Union
+from typing import Optional
 
 from agents import (
     Agent,
     ItemHelpers,
     ModelSettings,
-    OpenAIChatCompletionsModel,
+    OpenAIResponsesModel,
     Runner,
     ToolCallOutputItem,
     function_tool,
     set_tracing_disabled,
 )
-from openai import AsyncAzureOpenAI, AsyncOpenAI
+from openai import AsyncOpenAI
 from openai.types.responses import EasyInputMessageParam, ResponseInputItemParam, ResponseTextDeltaEvent
 
 from fastapi_app.api_models import (
-    AIChatRoles,
     BrandFilter,
     ChatRequestOverrides,
     Filter,
     ItemPublic,
-    Message,
     PriceFilter,
     RAGContext,
     RetrievalResponse,
@@ -45,7 +43,7 @@ class AdvancedRAGChat(RAGChatBase):
         messages: list[ResponseInputItemParam],
         overrides: ChatRequestOverrides,
         searcher: PostgresSearcher,
-        openai_chat_client: Union[AsyncOpenAI, AsyncAzureOpenAI],
+        openai_chat_client: AsyncOpenAI,
         chat_model: str,
         chat_deployment: Optional[str],  # Not needed for non-Azure OpenAI
     ):
@@ -54,7 +52,7 @@ class AdvancedRAGChat(RAGChatBase):
         self.model_for_thoughts = (
             {"model": chat_model, "deployment": chat_deployment} if chat_deployment else {"model": chat_model}
         )
-        openai_agents_model = OpenAIChatCompletionsModel(
+        openai_agents_model = OpenAIResponsesModel(
             model=chat_model if chat_deployment is None else chat_deployment, openai_client=openai_chat_client
         )
         self.search_agent = Agent(
@@ -71,7 +69,6 @@ class AdvancedRAGChat(RAGChatBase):
             model_settings=ModelSettings(
                 temperature=self.chat_params.temperature,
                 max_tokens=self.chat_params.response_token_limit,
-                extra_body={"seed": self.chat_params.seed} if self.chat_params.seed is not None else {},
             ),
         )
 
@@ -125,7 +122,7 @@ class AdvancedRAGChat(RAGChatBase):
         thoughts = [
             ThoughtStep(
                 title="Prompt to generate search arguments",
-                description=[{"content": self.query_prompt_template}]
+                description=[{"role": "system", "content": self.query_prompt_template}]
                 + ItemHelpers.input_to_new_input_list(run_results.input),
                 props=self.model_for_thoughts,
             ),
@@ -158,14 +155,14 @@ class AdvancedRAGChat(RAGChatBase):
         )
 
         return RetrievalResponse(
-            message=Message(content=str(run_results.final_output), role=AIChatRoles.ASSISTANT),
+            output_text=str(run_results.final_output),
             context=RAGContext(
                 data_points={item.id: item for item in items},
                 thoughts=earlier_thoughts
                 + [
                     ThoughtStep(
                         title="Prompt to generate answer",
-                        description=[{"content": self.answer_prompt_template}]
+                        description=[{"role": "system", "content": self.answer_prompt_template}]
                         + ItemHelpers.input_to_new_input_list(run_results.input),
                         props=self.model_for_thoughts,
                     ),
@@ -185,13 +182,14 @@ class AdvancedRAGChat(RAGChatBase):
         )
 
         yield RetrievalResponseDelta(
+            type="response.context",
             context=RAGContext(
                 data_points={item.id: item for item in items},
                 thoughts=earlier_thoughts
                 + [
                     ThoughtStep(
                         title="Prompt to generate answer",
-                        description=[{"content": self.answer_prompt_template}]
+                        description=[{"role": "system", "content": self.answer_prompt_template}]
                         + ItemHelpers.input_to_new_input_list(run_results.input),
                         props=self.model_for_thoughts,
                     ),
@@ -201,5 +199,5 @@ class AdvancedRAGChat(RAGChatBase):
 
         async for event in run_results.stream_events():
             if event.type == "raw_response_event" and isinstance(event.data, ResponseTextDeltaEvent):
-                yield RetrievalResponseDelta(delta=Message(content=str(event.data.delta), role=AIChatRoles.ASSISTANT))
+                yield RetrievalResponseDelta(type="response.output_text.delta", delta=str(event.data.delta))
         return
